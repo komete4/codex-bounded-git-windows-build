@@ -1,0 +1,27 @@
+name: Native Windows Git cancellation smoke (synthetic only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-git-cancel:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Run bounded native subprocess baseline
+        shell: pwsh
+        run: python scripts/native_git_cancel_smoke.py
+      - name: Upload receipt, even on failure
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: native-git-cancel-receipt
+          path: native-git-cancel-receipt.json
+          if-no-files-found: warn
+          retention-days: 7
