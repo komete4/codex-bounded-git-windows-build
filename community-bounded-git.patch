@@ -1,0 +1,245 @@
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index e7753db..d47b660 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -1,5 +1,6 @@
+ //! Root of the `codex-core` library.
+ 
++#![recursion_limit = "256"]
+ // Prevent accidental direct writes to stdout/stderr in library code. All
+ // user-visible output must go through the appropriate abstraction (e.g.,
+ // the TUI or the tracing stack).
+diff --git a/codex-rs/git-utils/Cargo.toml b/codex-rs/git-utils/Cargo.toml
+index c9409d4..cacddbc 100644
+--- a/codex-rs/git-utils/Cargo.toml
++++ b/codex-rs/git-utils/Cargo.toml
+@@ -26,7 +26,7 @@ serde = { workspace = true, features = ["derive"] }
+ similar = { workspace = true }
+ tempfile = { workspace = true }
+ thiserror = { workspace = true }
+-tokio = { workspace = true, features = ["macros", "process", "rt", "time"] }
++tokio = { workspace = true, features = ["macros", "process", "rt", "sync", "time"] }
+ ts-rs = { workspace = true, features = [
+     "uuid-impl",
+     "serde-json-impl",
+diff --git a/codex-rs/git-utils/src/info.rs b/codex-rs/git-utils/src/info.rs
+index aec8a01..aec0a68 100644
+--- a/codex-rs/git-utils/src/info.rs
++++ b/codex-rs/git-utils/src/info.rs
+@@ -1,13 +1,17 @@
+ use std::collections::BTreeMap;
+ use std::collections::HashSet;
++use std::future::Future;
+ use std::path::Path;
+ use std::path::PathBuf;
+ 
+-use futures::future::join_all;
++use futures::Stream;
++use futures::StreamExt;
++use futures::stream;
+ use schemars::JsonSchema;
+ use serde::Deserialize;
+ use serde::Serialize;
+ use tokio::process::Command;
++use tokio::sync::Semaphore;
+ use tokio::time::Duration as TokioDuration;
+ use ts_rs::TS;
+ 
+@@ -39,6 +43,8 @@ pub fn get_git_repo_root(base_dir: &Path) -> Option<PathBuf> {
+ /// Timeout for git commands to prevent freezing on large repositories
+ const GIT_COMMAND_TIMEOUT: TokioDuration = TokioDuration::from_secs(5);
+ const DISABLED_HOOKS_PATH: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
++const MAX_CONCURRENT_UNTRACKED_DIFFS: usize = 8;
++static UNTRACKED_DIFF_SEMAPHORE: Semaphore = Semaphore::const_new(MAX_CONCURRENT_UNTRACKED_DIFFS);
+ 
+ #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, TS)]
+ pub struct GitInfo {
+@@ -756,8 +762,12 @@ async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
+                 ];
+                 run_git_command_with_timeout_from(git, &args_vec, cwd, fsmonitor).await
+             });
+-            let results = join_all(futures_iter).await;
+-            for extra in results.into_iter().flatten() {
++            let results = bounded_untracked_diffs(futures_iter);
++            futures::pin_mut!(results);
++            while let Some(extra) = results.next().await {
++                let Some(extra) = extra else {
++                    continue;
++                };
+                 if extra.status.code().is_some_and(|c| c == 0 || c == 1)
+                     && let Ok(s) = String::from_utf8(extra.stdout)
+                 {
+@@ -770,6 +780,31 @@ async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
+     Some(diff)
+ }
+ 
++fn bounded_untracked_diffs<I, F>(diffs: I) -> impl Stream<Item = F::Output> + Send
++where
++    I: IntoIterator<Item = F>,
++    I::IntoIter: Send,
++    F: Future + Send,
++    F::Output: Send,
++{
++    stream::iter(diffs)
++        .map(|diff| async move {
++            // Remote requests may overlap, so share the limit across requests and
++            // acquire it before polling the future that spawns the Git process.
++            let _permit = UNTRACKED_DIFF_SEMAPHORE
++                .acquire()
++                .await
++                .unwrap_or_else(|_| unreachable!("untracked diff semaphore is never closed"));
++            diff.await
++        })
++        // Preserve the file listing order without retaining every completed diff.
++        .buffered(MAX_CONCURRENT_UNTRACKED_DIFFS)
++}
++
++#[cfg(test)]
++#[path = "untracked_diff_tests.rs"]
++mod untracked_diff_tests;
++
+ fn find_ancestor_git_entry(base_dir: &Path) -> Option<(PathBuf, PathBuf)> {
+     let mut dir = base_dir.to_path_buf();
+ 
+diff --git a/codex-rs/git-utils/src/untracked_diff_tests.rs b/codex-rs/git-utils/src/untracked_diff_tests.rs
+new file mode 100644
+index 0000000..b61c573
+--- /dev/null
++++ b/codex-rs/git-utils/src/untracked_diff_tests.rs
+@@ -0,0 +1,136 @@
++use super::*;
++use std::sync::Arc;
++use std::sync::Mutex;
++use std::sync::atomic::AtomicUsize;
++use std::sync::atomic::Ordering;
++use std::task::Poll;
++
++use pretty_assertions::assert_eq;
++
++static TEST_SEMAPHORE: Semaphore = Semaphore::const_new(1);
++
++#[test]
++fn untracked_diff_request_future_is_send() {
++    fn assert_request_future_is_send(cwd: &Path) {
++        fn assert_send(_: impl Future + Send) {}
++        assert_send(git_diff_to_remote(cwd));
++    }
++
++    // Construct and drop the real request future without polling or spawning Git.
++    assert_request_future_is_send(Path::new("."));
++}
++
++struct ActiveDiff(Arc<AtomicUsize>);
++
++impl Drop for ActiveDiff {
++    fn drop(&mut self) {
++        self.0.fetch_sub(1, Ordering::SeqCst);
++    }
++}
++
++#[tokio::test]
++async fn untracked_diffs_bound_overlapping_requests_and_preserve_all_results() {
++    let _test_guard = TEST_SEMAPHORE.acquire().await.expect("serialize tests");
++    let active = Arc::new(AtomicUsize::new(0));
++    let peak = Arc::new(AtomicUsize::new(0));
++    let completion_order = Arc::new(Mutex::new(Vec::new()));
++    let batch_size = 2048;
++    let batch = |start| {
++        let active = Arc::clone(&active);
++        let peak = Arc::clone(&peak);
++        let completion_order = Arc::clone(&completion_order);
++        let first_file_ready = Arc::new(tokio::sync::Notify::new());
++        bounded_untracked_diffs((start..start + batch_size).map(move |index| {
++            let active = Arc::clone(&active);
++            let peak = Arc::clone(&peak);
++            let completion_order = Arc::clone(&completion_order);
++            let first_file_ready = Arc::clone(&first_file_ready);
++            async move {
++                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
++                let _active_diff = ActiveDiff(active);
++                peak.fetch_max(current, Ordering::SeqCst);
++                if index == start {
++                    first_file_ready.notified().await;
++                } else {
++                    tokio::task::yield_now().await;
++                }
++                completion_order.lock().unwrap().push(index);
++                if index == start + 1 {
++                    first_file_ready.notify_one();
++                }
++                format!("patch-{index}\n")
++            }
++        }))
++        .collect::<Vec<_>>()
++    };
++
++    let (first, second) = tokio::time::timeout(TokioDuration::from_secs(10), async {
++        tokio::join!(batch(0), batch(batch_size))
++    })
++    .await
++    .expect("bounded diff requests should complete");
++
++    assert_eq!(peak.load(Ordering::SeqCst), MAX_CONCURRENT_UNTRACKED_DIFFS);
++    assert_eq!(active.load(Ordering::SeqCst), 0);
++    let expected = |start| {
++        (start..start + batch_size)
++            .map(|index| format!("patch-{index}\n"))
++            .collect::<Vec<_>>()
++    };
++    assert_eq!(first, expected(0));
++    assert_eq!(second, expected(batch_size));
++    let completed = completion_order.lock().unwrap();
++    assert_eq!(completed.len(), batch_size * 2);
++    assert_ne!(completed.first(), Some(&0));
++}
++
++#[tokio::test]
++async fn untracked_diffs_release_shared_permits_when_canceled() {
++    let _test_guard = TEST_SEMAPHORE.acquire().await.expect("serialize tests");
++    let active = Arc::new(AtomicUsize::new(0));
++    let mut request = Box::pin(
++        bounded_untracked_diffs((0..MAX_CONCURRENT_UNTRACKED_DIFFS * 2).map(|_| {
++            let active = Arc::clone(&active);
++            async move {
++                active.fetch_add(1, Ordering::SeqCst);
++                let _active_diff = ActiveDiff(active);
++                futures::future::pending::<usize>().await
++            }
++        }))
++        .collect::<Vec<_>>(),
++    );
++
++    tokio::time::timeout(
++        TokioDuration::from_secs(5),
++        futures::future::poll_fn(|cx| {
++            assert!(request.as_mut().poll(cx).is_pending());
++            if active.load(Ordering::SeqCst) == MAX_CONCURRENT_UNTRACKED_DIFFS {
++                Poll::Ready(())
++            } else {
++                Poll::Pending
++            }
++        }),
++    )
++    .await
++    .expect("request should acquire the shared permits");
++    assert_eq!(UNTRACKED_DIFF_SEMAPHORE.available_permits(), 0);
++
++    drop(request);
++    assert_eq!(active.load(Ordering::SeqCst), 0);
++    assert_eq!(
++        UNTRACKED_DIFF_SEMAPHORE.available_permits(),
++        MAX_CONCURRENT_UNTRACKED_DIFFS
++    );
++
++    let results = tokio::time::timeout(
++        TokioDuration::from_secs(5),
++        bounded_untracked_diffs((0..MAX_CONCURRENT_UNTRACKED_DIFFS).map(futures::future::ready))
++            .collect::<Vec<_>>(),
++    )
++    .await
++    .expect("a subsequent request should be able to run");
++    assert_eq!(
++        results,
++        (0..MAX_CONCURRENT_UNTRACKED_DIFFS).collect::<Vec<_>>()
++    );
++}

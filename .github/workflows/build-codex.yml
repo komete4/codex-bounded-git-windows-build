@@ -1,0 +1,71 @@
+name: Build reviewed Codex Windows candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reviewed-codex-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      LIBSQLITE3_FLAGS: SQLITE_DISABLE_INTRINSIC
+      STABLE_GIT_COMMIT: 74e804deeb1241d5fe699b31fb319f7d46454c42
+    steps:
+      - name: Checkout build kit without persisted credentials
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          path: build-kit
+      - name: Checkout exact public upstream source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourcePath = Join-Path $env:GITHUB_WORKSPACE 'codex-source'
+          git -c core.autocrlf=false -c core.longpaths=true init $sourcePath
+          if ($LASTEXITCODE -ne 0) { throw 'git init failed' }
+          git -c core.autocrlf=false -c core.longpaths=true -C $sourcePath remote add origin https://github.com/openai/codex.git
+          if ($LASTEXITCODE -ne 0) { throw 'git remote add failed' }
+          git -c core.autocrlf=false -c core.longpaths=true -C $sourcePath fetch --depth=1 origin 74e804deeb1241d5fe699b31fb319f7d46454c42
+          if ($LASTEXITCODE -ne 0) { throw 'git fetch failed' }
+          git -c core.autocrlf=false -c core.longpaths=true -C $sourcePath checkout --detach 74e804deeb1241d5fe699b31fb319f7d46454c42
+          if ($LASTEXITCODE -ne 0) { throw 'git checkout failed' }
+      - name: Rust 1.95.0 and Windows x64 target
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # upstream pinned action
+        with:
+          toolchain: 1.95.0
+          targets: x86_64-pc-windows-msvc
+          components: rust-src,rustfmt,clippy
+      - name: Python 3.12 for standard-library verification scripts
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0, upstream pin
+        with:
+          python-version: "3.12"
+      - name: Expose MSVC and Windows SDK using fixed upstream code
+        uses: ./codex-source/.github/actions/setup-msvc-env
+        with:
+          target: x86_64-pc-windows-msvc
+          host-arch: x64
+      - name: Verify inputs, test and build isolated candidate
+        shell: pwsh
+        run: >-
+          & "$env:GITHUB_WORKSPACE/build-kit/build-windows.ps1"
+          -SourceDirectory "$env:GITHUB_WORKSPACE/codex-source"
+          -KitDirectory "$env:GITHUB_WORKSPACE/build-kit"
+          -OutputDirectory "$env:GITHUB_WORKSPACE/build-artifacts"
+      - name: Upload candidate and evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-windows-x64-reviewed-candidate
+          path: build-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: false

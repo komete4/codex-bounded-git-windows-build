@@ -1,0 +1,35 @@
+FINITE WINDOWS CANDIDATE SMOKE
+
+Run only on an isolated Windows build runner after compilation:
+python smoke-candidate.py --binary <absolute-candidate-path> --source <pinned-checkout> --report <new-report.json>
+
+If the workspace version is explicitly normalized, pass --expected-version
+with the exact expected string and record that normalization in provenance.
+The default is "codex-cli 0.162.0-alpha.2".
+
+Checks PE AMD64/PE32+ headers, SHA-256 before/after, --version,
+app-server --help, and app-server generate-json-schema --out <owned-temp-dir>.
+Each command has a default 30-second timeout (configurable maximum: 120).
+Uses an owned temporary directory with isolated CODEX_HOME/profile and no
+inherited credentials. Uses no shell. On timeout it terminates only its exact
+command process. TemporaryDirectory removes only its own temporary directory.
+The JSON report is created exclusively; existing reports are not overwritten.
+
+The stable reference is codex-rs/app-server-protocol/schema/json, consistent
+with json_schema_fixtures_match_generated and experimental_api=false in source.
+The pinned upstream commit 74e804deeb1241d5fe699b31fb319f7d46454c42 contains
+317 reference files. The harness measures the count and requires identical
+names and bytes. JSON value equality is also reported to identify formatting
+differences. Missing or invalid reference data produces INCOMPLETE, never an
+implicit PASS. Exit codes: 0 PASS; 1 FAILED; 2 INCOMPLETE.
+
+LIMITATIONS
+PASS establishes only these CLI and stable-schema checks. It does not test
+native Git concurrency limits, cancellation or descendant cleanup, memory
+retention, review/snapshot load, or Remote session behavior.
+It does not independently verify executable authenticity/signature,
+source-to-binary provenance, or desktop replacement compatibility.
+Source/tag/patch/build provenance must be established separately.
+No authentication, model calls, session start/resume, remote control, or
+agent task execution is performed. The three CLI/schema commands run the candidate.
+The harness does not install, replace, restart, close, or modify a desktop client.
