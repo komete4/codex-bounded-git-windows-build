@@ -26,7 +26,7 @@ A fresh cloud-hosted chat working does not demonstrate that its execution path s
 ## Related public issue
 
 - [openai/codex#41982](https://github.com/openai/codex/issues/41982) reports Android Remote chat hydration correlated with automatic Git review/snapshot activity and Windows virtual-memory exhaustion. Compare mechanisms, **do not assume identical root cause**.
-- The upstream public discussion linked from this repo's [README](../README.md) describes the bounded-untracked-diff patch context.
+- The upstream public discussion linked from this repo's [README](../../README.md) describes the bounded-untracked-diff patch context.
 
 ## What this patch actually does
 
