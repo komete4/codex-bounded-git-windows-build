@@ -2,6 +2,14 @@
 
 Experimental build recipe for the public `openai/codex` source with a community patch that bounds concurrent untracked-file diff operations. This repository is an independent reproduction kit, not an official OpenAI release or a demonstration that a particular stability problem is resolved.
 
+## Project status (2026-10-13)
+
+- **Experimental research only.** This repository is not part of the current WinWork deployment. Production workers have been moved to Cloud independently; that operational mitigation does not validate this patch.
+- `main` contains a pinned, reproducible *recipe*, not a verified Windows fix. No completed Windows build or installed candidate is asserted here.
+- [PR #1](https://github.com/komete4/codex-bounded-git-windows-build/pull/1) records the reported incident and proposed acceptance gates; it remains draft pending provenance review.
+- [PR #2](https://github.com/komete4/codex-bounded-git-windows-build/pull/2) proposes a synthetic native Git cancellation baseline; it remains draft and unexecuted, and it does not exercise Codex itself.
+- **No WinWork execution, deployment or worker changes are planned from this repository.** Revisit only if the problem recurs or the experimental work has a justified maintainer and validation environment.
+
 ## Pinned inputs
 
 | Input | Value |
