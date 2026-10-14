@@ -51,3 +51,7 @@ This repository contains the build recipe, patch, and upstream license notices. 
 ## Licensing
 
 Upstream licensing and attribution are preserved in [LICENSE.upstream](LICENSE.upstream) and [NOTICE.upstream](NOTICE.upstream).
+
+## WinWork incident evidence
+
+The [8–9 October 2026 Remote/Codex incident note](docs/incidents/2026-10-08-winwork-remote.md) preserves sanitized auditor-reported resource pressure, Android Remote observations and a narrowly scoped correction/acceptance plan. It is **not** proof that this patch fixes the incident. No host deployment is authorized by this documentation.
